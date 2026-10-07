@@ -83,6 +83,17 @@ def test_internal_exception_not_exposed():
     assert "db conn" not in (env.failure_reason or "")
 
 
+def test_destroy_after_failed_allocation_does_not_double_release():
+    log.info("回归：分配失败(额度已释放)后再销毁，不能重复 release 导致计数错乱")
+    svc, _ = _flaky_service(fail_times=1)
+    env = svc.request_env("alice", "k1")
+    other = svc.request_env("alice", "k2")  # 此时 alice 占 1 份额度
+    assert svc.usage("alice")["user_used"] == 1
+    svc.destroy(env.env_id, "alice")  # 失败停留在 REQUESTED 的环境已不占额度
+    assert svc.usage("alice")["user_used"] == 1  # 另一个环境的额度不被连带多放
+    assert other.status is EnvStatus.READY
+
+
 def test_concurrent_allocate_same_env_only_once():
     log.info("验证 并发对同一环境触发分配，分配器只被调用一次")
     calls = {"n": 0}
