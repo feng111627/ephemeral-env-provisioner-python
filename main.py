@@ -1,12 +1,14 @@
-"""HTTP API：自助申请 / 查询 / 重试 / 销毁临时环境。
+"""HTTP API：自助申请 / 查询 / 重试 / 续租 / 到期回收 / 销毁临时环境。
 
 错误映射：Rejection.code -> HTTP 状态码 + 可区分 error 字段；
+请求参数校验失败统一为 400 INVALID_PARAM；
 未预期的内部异常统一返回 500 INTERNAL，不泄露堆栈。
 """
 import logging
 
 import uvicorn
 from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
@@ -28,6 +30,9 @@ _CODE_TO_HTTP = {
     ErrorCode.ILLEGAL_TRANSITION: 409,
     ErrorCode.ENV_NOT_FOUND: 404,
     ErrorCode.ALLOCATE_FAILED: 500,
+    ErrorCode.LEASE_NOT_ACTIVE: 409,
+    ErrorCode.LEASE_EXPIRED: 409,
+    ErrorCode.ENV_DESTROYED: 409,
     ErrorCode.INTERNAL: 500,
 }
 
@@ -40,6 +45,16 @@ async def rejection_handler(_: Request, exc: Rejection) -> JSONResponse:
     )
 
 
+@app.exception_handler(RequestValidationError)
+async def validation_handler(_: Request, exc: RequestValidationError) -> JSONResponse:
+    # 参数校验细节不向外泄露，统一为可区分的 INVALID_PARAM
+    logging.getLogger("api").warning("请求参数非法: %r", exc.errors())
+    return JSONResponse(
+        status_code=400,
+        content={"error": "INVALID_PARAM", "message": "请求参数不合法"},
+    )
+
+
 @app.exception_handler(Exception)
 async def internal_handler(_: Request, exc: Exception) -> JSONResponse:
     logging.getLogger("api").exception("内部异常")
@@ -49,6 +64,12 @@ async def internal_handler(_: Request, exc: Exception) -> JSONResponse:
 class RequestBody(BaseModel):
     owner: str = Field(min_length=1)
     idempotency_key: str = Field(min_length=1)
+    # 可选租约时长（秒）；不传或为 null 表示永不过期（兼容旧用法）
+    ttl_seconds: int | None = Field(default=None, gt=0)
+
+
+class RenewBody(BaseModel):
+    ttl_seconds: int = Field(gt=0)
 
 
 def _view(env: Environment) -> dict:
@@ -57,18 +78,27 @@ def _view(env: Environment) -> dict:
         "owner": env.owner,
         "status": env.status.value,
         "failure_reason": env.failure_reason,
+        "ttl_seconds": env.ttl_seconds,
+        "expires_at": env.expires_at,
         "history": env.history,
     }
 
 
 @app.post("/envs", status_code=201)
 def request_env(body: RequestBody):
-    return _view(service.request_env(body.owner, body.idempotency_key))
+    return _view(service.request_env(body.owner, body.idempotency_key, body.ttl_seconds))
 
 
 @app.get("/envs")
 def list_envs(owner: str):
     return [_view(e) for e in service.list_by_owner(owner)]
+
+
+@app.post("/envs/reap-expired")
+def reap_expired():
+    """确定性触发到期回收（亦可由后台定时任务调用同一逻辑）。"""
+    reaped = service.reap_expired()
+    return {"reaped": reaped, "count": len(reaped)}
 
 
 @app.get("/envs/{env_id}")
@@ -79,6 +109,11 @@ def get_env(env_id: str, owner: str):
 @app.post("/envs/{env_id}/retry")
 def retry_env(env_id: str, owner: str):
     return _view(service.retry(env_id, owner))
+
+
+@app.post("/envs/{env_id}/renew")
+def renew_env(env_id: str, owner: str, body: RenewBody):
+    return _view(service.renew_lease(env_id, owner, body.ttl_seconds))
 
 
 @app.delete("/envs/{env_id}")

@@ -14,6 +14,9 @@ class ErrorCode(enum.Enum):
     ILLEGAL_TRANSITION = "ILLEGAL_TRANSITION"
     ENV_NOT_FOUND = "ENV_NOT_FOUND"
     ALLOCATE_FAILED = "ALLOCATE_FAILED"
+    LEASE_NOT_ACTIVE = "LEASE_NOT_ACTIVE"  # 未就绪/无租约，不可续租
+    LEASE_EXPIRED = "LEASE_EXPIRED"        # 租约已到期并回收（终态）
+    ENV_DESTROYED = "ENV_DESTROYED"        # 已手动销毁（终态）
     INTERNAL = "INTERNAL"
 
 
